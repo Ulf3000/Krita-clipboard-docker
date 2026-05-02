@@ -102,9 +102,9 @@ class BCClipboardModel(QAbstractListModel):
 class BCClipboardDelegate(QStyledItemDelegate):
     """Renders each clipboard item with thumbnail + metadata."""
 
-    THUMB_W    = 96
-    THUMB_H    = 96
-    PADDING    = 6
+    THUMB_W    = 48
+    THUMB_H    = 48
+    PADDING    = 3
     TEXT_LINES = 3   # source, size, timestamp
 
     def sizeHint(self, option, index):
@@ -162,7 +162,7 @@ class BCClipboardDelegate(QStyledItemDelegate):
         text_w    = rect.right() - text_x - p
         line_h    = (self.THUMB_H) // self.TEXT_LINES
         small_fnt = painter.font()
-        small_fnt.setPointSize(max(7, small_fnt.pointSize() - 1))
+        small_fnt.setPointSize(max(6, small_fnt.pointSize()))
 
         painter.setPen(fg)
         painter.setFont(small_fnt)
@@ -202,7 +202,7 @@ class BCClipboardDetail(QWidget):
 
         self._preview = QLabel()
         self._preview.setAlignment(Qt.AlignCenter)
-        self._preview.setMinimumHeight(180)
+        self._preview.setMinimumHeight(120)
         self._preview.setStyleSheet('background:#2a2a2a; border:1px solid #555;')
         layout.addWidget(self._preview)
 

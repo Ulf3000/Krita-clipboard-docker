@@ -61,8 +61,8 @@ class BCClipboardItem(QObject):
     thumbnailReady = pyqtSignal(str)   # emits item uuid when thumb is available
 
     # Default thumbnail size
-    THUMB_W = 128
-    THUMB_H = 128
+    THUMB_W = 48
+    THUMB_H = 48
 
     def __init__(self, item_type=BCClipboardItemType.UNKNOWN,
                  source_info='', parent=None):
@@ -329,11 +329,15 @@ class BCClipboardManager(QObject):
             return
 
         loaded = []
+        dirty = False   # track if any entries were dropped
         for meta in meta_list:
             item_uuid = meta.get('uuid', '')
             if not item_uuid:
                 continue
             img_path = self._imagePath(item_uuid)
+            if not img_path.exists():
+                dirty = True   # PNG was deleted externally — drop this entry
+                continue
             item = BCClipboardItem.fromDict(meta, img_path)
             loaded.append(item)
             if item.hash:
@@ -346,6 +350,45 @@ class BCClipboardManager(QObject):
             self.itemAdded.emit(item)
 
         print(f'[ClipboardDocker] Loaded {len(loaded)} items from history')
+        if dirty:
+            self._saveHistory()
+            print(f'[ClipboardDocker] Pruned missing entries and resaved history')
+
+        # --- Pick up PNGs dropped into the images/ folder manually ---
+        known_uuids = {i.uuid for i in self._items}
+        images_dir  = self._getDataDir() / IMAGES_DIR
+        orphans     = []
+        uuid_pat    = re.compile(
+            r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+            re.IGNORECASE
+        )
+        for png in sorted(images_dir.glob('*.png'),
+                          key=lambda p: p.stat().st_mtime, reverse=True):
+            stem = png.stem
+            if stem in known_uuids:
+                continue                        # already loaded
+            if not uuid_pat.match(stem):
+                continue                        # not our file, leave it alone
+            img = QImage(str(png))
+            if img.isNull():
+                continue
+            item = BCClipboardItem(BCClipboardItemType.IMAGE, f'Imported: {png.name}')
+            item._uuid = stem                   # reuse the filename as uuid
+            item.setImage(img)
+            # Preserve file modification time as timestamp
+            mtime = png.stat().st_mtime
+            item._timestamp = datetime.datetime.fromtimestamp(mtime)
+            orphans.append(item)
+            if item.hash:
+                self._known_hashes.add(item.hash)
+
+        if orphans:
+            # Append at the end (they're older than session items)
+            self._items.extend(orphans)
+            for item in orphans:
+                self.itemAdded.emit(item)
+            self._saveHistory()
+            print(f'[ClipboardDocker] Imported {len(orphans)} externally added PNG(s)')
 
     # ------------------------------------------------------------------
     # Clipboard detection
