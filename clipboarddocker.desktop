@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Service
+ServiceTypes=Krita/PythonPlugin
+X-KDE-Library=clipboarddocker
+X-Python-2-Compatible=false
+Name=Clipboard Docker
+Comment=Persistent clipboard manager docker for Krita
