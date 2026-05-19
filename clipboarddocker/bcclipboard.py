@@ -10,7 +10,6 @@ import json
 import uuid
 import hashlib
 import datetime
-import urllib.request
 from pathlib import Path
 
 from krita import Krita
@@ -18,7 +17,7 @@ from krita import Krita
 from PyQt5.Qt import (
     QObject, QPixmap, QImage, QByteArray, QBuffer, QIODevice,
     QApplication, QClipboard, QMimeData,
-    QThread, pyqtSignal, QTimer, QMutex, QMutexLocker,
+    pyqtSignal, QTimer, QMutex, QMutexLocker,
     QStandardPaths,
 )
 
@@ -28,7 +27,6 @@ from PyQt5.Qt import (
 # ---------------------------------------------------------------------------
 def _data_dir() -> Path:
     """Return (and create) the plugin's persistent storage directory."""
-    # QStandardPaths gives us the right folder cross-platform
     base = QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)
     d = Path(base) / 'clipboarddocker'
     d.mkdir(parents=True, exist_ok=True)
@@ -36,8 +34,8 @@ def _data_dir() -> Path:
     return d
 
 
-HISTORY_FILE = 'history.json'
-IMAGES_DIR   = 'images'
+HISTORY_FILE  = 'history.json'
+IMAGES_DIR    = 'images'
 MAX_IMAGE_MB  = 50   # refuse to save images larger than this
 
 
@@ -45,11 +43,10 @@ MAX_IMAGE_MB  = 50   # refuse to save images larger than this
 # Item types
 # ---------------------------------------------------------------------------
 class BCClipboardItemType:
-    UNKNOWN  = 'unknown'
-    IMAGE    = 'image'      # raw image data in clipboard
-    URL      = 'url'        # URL string (image will be downloaded)
-    FILE     = 'file'       # local file path(s)
-    LAYER    = 'layer'      # copied from Krita layer (internal)
+    UNKNOWN = 'unknown'
+    IMAGE   = 'image'    # raw image data in clipboard
+    FILE    = 'file'     # local file path(s)
+    LAYER   = 'layer'    # copied from Krita layer (internal)
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +57,6 @@ class BCClipboardItem(QObject):
 
     thumbnailReady = pyqtSignal(str)   # emits item uuid when thumb is available
 
-    # Default thumbnail size
     THUMB_W = 48
     THUMB_H = 48
 
@@ -69,9 +65,9 @@ class BCClipboardItem(QObject):
         super().__init__(parent)
         self._uuid       = str(uuid.uuid4())
         self._type       = item_type
-        self._source     = source_info          # url / filepath / description
-        self._image      = None                 # QImage, loaded lazily
-        self._thumbnail  = None                 # QPixmap thumbnail
+        self._source     = source_info
+        self._image      = None       # QImage, loaded lazily
+        self._thumbnail  = None       # QPixmap thumbnail
         self._timestamp  = datetime.datetime.now()
         self._pinned     = False
         self._size_w     = 0
@@ -115,15 +111,17 @@ class BCClipboardItem(QObject):
         if qimage is None or qimage.isNull():
             self._load_error = 'Null image'
             return False
-        self._image  = qimage
-        self._size_w = qimage.width()
-        self._size_h = qimage.height()
-        # SHA-1 hash of raw pixel data for duplicate detection
-        ba = QByteArray()
-        buf = QBuffer(ba)
-        buf.open(QIODevice.WriteOnly)
-        qimage.save(buf, 'PNG')
-        self._hash = hashlib.sha1(ba.data()).hexdigest()
+        # Always store a fully owned copy — the caller may have passed a QImage
+        # that shares memory with an external buffer (e.g. Krita's tile pool).
+        # .copy() unconditionally allocates fresh memory and detaches.
+        self._image  = qimage.copy()
+        self._size_w = self._image.width()
+        self._size_h = self._image.height()
+        # Hash raw ARGB32 pixels — no PNG encode.
+        img32 = self._image.convertToFormat(QImage.Format_ARGB32)
+        ptr = img32.bits()
+        ptr.setsize(img32.byteCount())
+        self._hash = hashlib.sha1(bytes(ptr)).hexdigest()
         self._buildThumbnail()
         return True
 
@@ -133,17 +131,16 @@ class BCClipboardItem(QObject):
         px = QPixmap.fromImage(self._image)
         self._thumbnail = px.scaled(
             self.THUMB_W, self.THUMB_H,
-            aspectRatioMode=1,          # Qt.KeepAspectRatio
-            transformMode=1             # Qt.SmoothTransformation
+            aspectRatioMode=1,   # Qt.KeepAspectRatio
+            transformMode=1      # Qt.SmoothTransformation
         )
 
     def typeLabel(self):
         labels = {
-            BCClipboardItemType.IMAGE:  'Image',
-            BCClipboardItemType.URL:    'URL',
-            BCClipboardItemType.FILE:   'File',
-            BCClipboardItemType.LAYER:  'Layer',
-            BCClipboardItemType.UNKNOWN:'?',
+            BCClipboardItemType.IMAGE:   'Image',
+            BCClipboardItemType.FILE:    'File',
+            BCClipboardItemType.LAYER:   'Layer',
+            BCClipboardItemType.UNKNOWN: '?',
         }
         return labels.get(self._type, '?')
 
@@ -165,7 +162,6 @@ class BCClipboardItem(QObject):
     # Serialisation
     # ------------------------------------------------------------------
     def toDict(self) -> dict:
-        """Return a JSON-serialisable dict of metadata (no image data)."""
         return {
             'uuid':      self._uuid,
             'type':      self._type,
@@ -184,16 +180,15 @@ class BCClipboardItem(QObject):
             item_type   = d.get('type',   BCClipboardItemType.UNKNOWN),
             source_info = d.get('source', ''),
         )
-        item._uuid    = d.get('uuid', item._uuid)
-        item._pinned  = d.get('pinned', False)
-        item._size_w  = d.get('size_w', 0)
-        item._size_h  = d.get('size_h', 0)
-        item._hash    = d.get('hash', '')
+        item._uuid   = d.get('uuid', item._uuid)
+        item._pinned = d.get('pinned', False)
+        item._size_w = d.get('size_w', 0)
+        item._size_h = d.get('size_h', 0)
+        item._hash   = d.get('hash', '')
         try:
             item._timestamp = datetime.datetime.fromisoformat(d['timestamp'])
         except Exception:
             pass
-        # Load image from disk
         if image_path.exists():
             img = QImage(str(image_path))
             if not img.isNull():
@@ -203,50 +198,20 @@ class BCClipboardItem(QObject):
 
 
 # ---------------------------------------------------------------------------
-# URL download worker thread
-# ---------------------------------------------------------------------------
-class BCClipboardURLWorker(QThread):
-    """Downloads an image from a URL in the background."""
-    finished = pyqtSignal(str, QImage)   # uuid, image (null if failed)
-    error    = pyqtSignal(str, str)      # uuid, message
-
-    def __init__(self, item_uuid, url, parent=None):
-        super().__init__(parent)
-        self._uuid = item_uuid
-        self._url  = url
-
-    def run(self):
-        try:
-            req = urllib.request.Request(
-                self._url,
-                headers={'User-Agent': 'Mozilla/5.0 KritaClipboardDocker/1.0'}
-            )
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                data = resp.read()
-            img = QImage()
-            img.loadFromData(data)
-            self.finished.emit(self._uuid, img)
-        except Exception as exc:
-            self.finished.emit(self._uuid, QImage())
-            self.error.emit(self._uuid, str(exc))
-
-
-# ---------------------------------------------------------------------------
 # Clipboard manager
 # ---------------------------------------------------------------------------
 class BCClipboardManager(QObject):
     """
     Monitors the system clipboard and maintains a persistent history of
-    copied image items.  Re-implements the core logic from BuliCommander's
-    clipboard subsystem without the file-manager dependencies.
+    copied image items.
     """
 
-    itemAdded    = pyqtSignal(BCClipboardItem)
-    itemUpdated  = pyqtSignal(BCClipboardItem)
-    itemRemoved  = pyqtSignal(str)              # uuid
-    cleared      = pyqtSignal()
+    itemAdded   = pyqtSignal(BCClipboardItem)
+    itemUpdated = pyqtSignal(BCClipboardItem)
+    itemRemoved = pyqtSignal(str)   # uuid
+    cleared     = pyqtSignal()
 
-    MAX_HISTORY  = 64
+    MAX_HISTORY = 64
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -255,31 +220,40 @@ class BCClipboardManager(QObject):
         self._active = False
         self._known_hashes: set[str] = set()
 
-        # Persistent storage paths (resolved lazily so QApplication is ready)
         self._data_dir: Path = None
 
-        # Poll-based watching (clipboard dataChanged is not reliable cross-platform)
-        self._timer = QTimer(self)
-        self._timer.setInterval(500)
-        self._timer.timeout.connect(self._checkClipboard)
-        self._last_clipboard_text = ''
-        self._last_clipboard_hash = ''
+        # Deferred read: fire once, 250 ms after dataChanged.
+        # We never call cb.image() inside the dataChanged handler itself.
+        # Krita emits dataChanged before its internal stroke/transaction is
+        # fully committed, so reading clipboard immediately interrupts the
+        # tile pool (“releasing of pooled memory has been cancelled” +
+        # KisSynchronizedConnection warnings in an endless loop).
+        # Single-shot delay lets Krita finish before we touch pixel data.
+        self._pending_timer = QTimer(self)
+        self._pending_timer.setSingleShot(True)
+        self._pending_timer.setInterval(250)
+        self._pending_timer.timeout.connect(self._checkClipboard)
 
-        self._download_workers: dict[str, BCClipboardURLWorker] = {}
+        self._last_clipboard_hash = ''
+        self._checking = False
+
 
     # ------------------------------------------------------------------
     # Start / stop
     # ------------------------------------------------------------------
     def start(self):
-        if not self._active:
-            self._active = True
-            self._loadHistory()          # ← load saved history first
-            self._timer.start()
-            QApplication.clipboard().dataChanged.connect(self._onClipboardDataChanged)
+        if self._active:
+            return   # FIX: strict guard — never connect the signal twice
+        self._active = True
+        self._loadHistory()
+        # connect dataChanged exactly once; _pending_timer fires on demand
+        QApplication.clipboard().dataChanged.connect(self._onClipboardDataChanged)
 
     def stop(self):
+        if not self._active:
+            return
         self._active = False
-        self._timer.stop()
+        self._pending_timer.stop()
         try:
             QApplication.clipboard().dataChanged.disconnect(self._onClipboardDataChanged)
         except Exception:
@@ -297,17 +271,13 @@ class BCClipboardManager(QObject):
         return self._getDataDir() / IMAGES_DIR / f'{item_uuid}.png'
 
     def _saveHistory(self):
-        """Write history.json + any missing image PNGs."""
         d = self._getDataDir()
-        # Save images for items that don't have a file yet
         for item in self._items:
             img_path = self._imagePath(item.uuid)
             if item.image is not None and not img_path.exists():
-                # Skip very large images to avoid filling disk
                 sz_mb = (item.sizeW * item.sizeH * 4) / (1024 * 1024)
                 if sz_mb <= MAX_IMAGE_MB:
                     item.image.save(str(img_path), 'PNG')
-        # Write metadata
         meta = [i.toDict() for i in self._items]
         try:
             with open(d / HISTORY_FILE, 'w', encoding='utf-8') as f:
@@ -316,7 +286,6 @@ class BCClipboardManager(QObject):
             print(f'[ClipboardDocker] Could not save history: {e}')
 
     def _loadHistory(self):
-        """Read history.json and reconstruct items from saved PNGs."""
         d = self._getDataDir()
         hist_file = d / HISTORY_FILE
         if not hist_file.exists():
@@ -329,23 +298,21 @@ class BCClipboardManager(QObject):
             return
 
         loaded = []
-        dirty = False   # track if any entries were dropped
+        dirty  = False
         for meta in meta_list:
             item_uuid = meta.get('uuid', '')
             if not item_uuid:
                 continue
             img_path = self._imagePath(item_uuid)
             if not img_path.exists():
-                dirty = True   # PNG was deleted externally — drop this entry
+                dirty = True
                 continue
             item = BCClipboardItem.fromDict(meta, img_path)
             loaded.append(item)
             if item.hash:
                 self._known_hashes.add(item.hash)
 
-        # Bulk-insert without triggering individual itemAdded signals
         self._items = loaded
-        # Notify UI to rebuild
         for item in self._items:
             self.itemAdded.emit(item)
 
@@ -354,7 +321,7 @@ class BCClipboardManager(QObject):
             self._saveHistory()
             print(f'[ClipboardDocker] Pruned missing entries and resaved history')
 
-        # --- Pick up PNGs dropped into the images/ folder manually ---
+        # Pick up PNGs dropped into images/ manually
         known_uuids = {i.uuid for i in self._items}
         images_dir  = self._getDataDir() / IMAGES_DIR
         orphans     = []
@@ -366,16 +333,15 @@ class BCClipboardManager(QObject):
                           key=lambda p: p.stat().st_mtime, reverse=True):
             stem = png.stem
             if stem in known_uuids:
-                continue                        # already loaded
+                continue
             if not uuid_pat.match(stem):
-                continue                        # not our file, leave it alone
+                continue
             img = QImage(str(png))
             if img.isNull():
                 continue
             item = BCClipboardItem(BCClipboardItemType.IMAGE, f'Imported: {png.name}')
-            item._uuid = stem                   # reuse the filename as uuid
+            item._uuid = stem
             item.setImage(img)
-            # Preserve file modification time as timestamp
             mtime = png.stat().st_mtime
             item._timestamp = datetime.datetime.fromtimestamp(mtime)
             orphans.append(item)
@@ -383,7 +349,6 @@ class BCClipboardManager(QObject):
                 self._known_hashes.add(item.hash)
 
         if orphans:
-            # Append at the end (they're older than session items)
             self._items.extend(orphans)
             for item in orphans:
                 self.itemAdded.emit(item)
@@ -394,9 +359,24 @@ class BCClipboardManager(QObject):
     # Clipboard detection
     # ------------------------------------------------------------------
     def _onClipboardDataChanged(self):
-        self._checkClipboard()
+        # Do NOT call _checkClipboard() here directly. Krita emits dataChanged
+        # before its tile transaction is done. (Re)start the single-shot timer;
+        # rapid-fire copies collapse into one deferred read.
+        self._pending_timer.start()
 
     def _checkClipboard(self):
+        # Runs 250 ms after the last dataChanged — Krita is done by now.
+        # Re-entrancy guard kept for safety (cb.image() can emit dataChanged
+        # on some platforms, which would restart the pending timer).
+        if self._checking:
+            return
+        self._checking = True
+        try:
+            self._doCheckClipboard()
+        finally:
+            self._checking = False
+
+    def _doCheckClipboard(self):
         cb   = QApplication.clipboard()
         mime = cb.mimeData()
         if mime is None:
@@ -406,35 +386,27 @@ class BCClipboardManager(QObject):
         if mime.hasImage():
             img = cb.image()
             if img and not img.isNull():
-                ba = QByteArray()
-                buf = QBuffer(ba)
-                buf.open(QIODevice.WriteOnly)
-                img.save(buf, 'PNG')
-                h = hashlib.sha1(ba.data()).hexdigest()
+                # CRITICAL: cb.image() when Krita is the clipboard owner returns
+                # a QImage that shares memory with Krita's internal tile pool.
+                # convertToFormat() alone is not guaranteed to detach if the
+                # format already matches.  QImage.copy() always allocates fresh
+                # owned memory, fully releasing Krita's tile references.
+                # We must do this before touching .bits() or storing the image,
+                # otherwise the tile pool can never free and emits endless
+                # "releasing of pooled memory has been cancelled" + 
+                # KisSynchronizedConnection warnings.
+                img_owned = img.copy()
+                img32 = img_owned.convertToFormat(QImage.Format_ARGB32)
+                ptr = img32.bits()
+                ptr.setsize(img32.byteCount())
+                h = hashlib.sha1(bytes(ptr)).hexdigest()
                 if h != self._last_clipboard_hash:
                     self._last_clipboard_hash = h
                     item = BCClipboardItem(BCClipboardItemType.IMAGE, 'Clipboard image')
-                    item.setImage(img)
+                    item.setImage(img_owned)   # store the detached copy, not img
                     self._addItem(item)
             return
 
-        # --- URL(s) in clipboard text ---
-        if mime.hasText():
-            text = mime.text().strip()
-            if text == self._last_clipboard_text:
-                return
-            self._last_clipboard_text = text
-
-            # Check if it looks like an image URL
-            url_pat = re.compile(
-                r'^https?://\S+\.(?:png|jpe?g|gif|webp|bmp|tiff?|svg)(\?.*)?$',
-                re.IGNORECASE
-            )
-            if url_pat.match(text):
-                item = BCClipboardItem(BCClipboardItemType.URL, text)
-                self._addItem(item)
-                self._startURLDownload(item)
-                return
 
         # --- Local file paths ---
         if mime.hasUrls():
@@ -452,24 +424,6 @@ class BCClipboardManager(QObject):
                                 item.setImage(img)
                             self._addItem(item)
 
-    # ------------------------------------------------------------------
-    # URL download
-    # ------------------------------------------------------------------
-    def _startURLDownload(self, item: BCClipboardItem):
-        worker = BCClipboardURLWorker(item.uuid, item.source, self)
-        worker.finished.connect(self._onURLDownloadFinished)
-        self._download_workers[item.uuid] = worker
-        worker.start()
-
-    def _onURLDownloadFinished(self, item_uuid: str, img: QImage):
-        item = self.getItem(item_uuid)
-        if item is not None:
-            if not img.isNull():
-                item.setImage(img)
-            self.itemUpdated.emit(item)
-            self._saveHistory()
-        if item_uuid in self._download_workers:
-            del self._download_workers[item_uuid]
 
     # ------------------------------------------------------------------
     # Item management
@@ -481,14 +435,12 @@ class BCClipboardManager(QObject):
             self._items.insert(0, item)
             if item.hash:
                 self._known_hashes.add(item.hash)
-            # Trim history (keep pinned items)
             unpinned = [i for i in self._items if not i.pinned]
             while len(self._items) > self.MAX_HISTORY and unpinned:
                 oldest = unpinned.pop()
                 self._items.remove(oldest)
                 if oldest.hash:
                     self._known_hashes.discard(oldest.hash)
-                # Delete the saved PNG for the evicted item
                 try:
                     self._imagePath(oldest.uuid).unlink(missing_ok=True)
                 except Exception:
@@ -511,7 +463,6 @@ class BCClipboardManager(QObject):
             self._items.remove(item)
             if item.hash:
                 self._known_hashes.discard(item.hash)
-        # Delete PNG from disk
         try:
             self._imagePath(item_uuid).unlink(missing_ok=True)
         except Exception:
@@ -529,7 +480,6 @@ class BCClipboardManager(QObject):
                 removed = [i for i in self._items if not i.pinned]
                 self._items = [i for i in self._items if i.pinned]
                 self._known_hashes = {i.hash for i in self._items if i.hash}
-        # Delete PNGs for removed items
         for item in removed:
             try:
                 self._imagePath(item.uuid).unlink(missing_ok=True)
@@ -547,11 +497,9 @@ class BCClipboardManager(QObject):
 
     @property
     def storageDir(self) -> str:
-        """Return the path where history is saved (for display in UI)."""
         return str(_data_dir())
 
     def saveHistory(self):
-        """Public alias – call to force a save."""
         self._saveHistory()
 
     # ------------------------------------------------------------------
@@ -561,7 +509,13 @@ class BCClipboardManager(QObject):
         """Put the item's image back onto the system clipboard."""
         if item.image is None:
             return
-        QApplication.clipboard().setImage(item.image)
+        # FIX: block our own signal while we set the clipboard so we don't
+        # immediately re-ingest the image we just put there.
+        cb = QApplication.clipboard()
+        cb.dataChanged.disconnect(self._onClipboardDataChanged)
+        cb.setImage(item.image)
+        self._last_clipboard_hash = item.hash   # mark as already known
+        cb.dataChanged.connect(self._onClipboardDataChanged)
 
     def openAsNewDocument(self, item: BCClipboardItem):
         """Open item image as a new Krita document."""
@@ -574,31 +528,23 @@ class BCClipboardManager(QObject):
         )
         Krita.instance().activeWindow().addView(doc)
         layer = doc.activeNode()
-        layer.setPixelData(
-            item.image.convertToFormat(QImage.Format_ARGB32).bits().asstring(
-                item.sizeW * item.sizeH * 4
-            ),
-            0, 0, item.sizeW, item.sizeH
-        )
+        img32 = item.image.convertToFormat(QImage.Format_ARGB32)
+        ptr = img32.bits()
+        ptr.setsize(img32.byteCount())
+        layer.setPixelData(bytes(ptr), 0, 0, item.sizeW, item.sizeH)
         doc.refreshProjection()
 
     def openAsReferenceImage(self, item: BCClipboardItem):
         """Add item image as a reference image in the active Krita document."""
         if item.image is None:
             return
-        app = Krita.instance()
-        win = app.activeWindow()
-        if win is None:
-            return
-        view = win.activeView()
-        if view is None:
-            return
-        # Save temp file and add as reference
-        import tempfile
-        tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
-        item.image.save(tmp.name, 'PNG')
-        tmp.close()
-        view.document().addDotPoint(tmp.name)   # Krita scripting API
+        # FIX: Krita has no addDotPoint(). The correct approach is to save a
+        # temp file and use the built-in "Add Reference Image" action, or
+        # simply copy to clipboard and let the user use Edit > Paste as Reference.
+        # For now we just copy to clipboard with a status hint.
+        self.copyToClipboard(item)
+        print('[ClipboardDocker] Image copied to clipboard — '
+              'use Edit > Paste as Reference Image in Krita.')
 
     def pasteAsLayer(self, item: BCClipboardItem):
         """Paste item image as a new paint layer in the active document."""
@@ -610,11 +556,9 @@ class BCClipboardManager(QObject):
             return
         layer = doc.createNode('Clipboard layer', 'paintlayer')
         doc.rootNode().addChildNode(layer, None)
-        layer.setPixelData(
-            item.image.convertToFormat(QImage.Format_ARGB32).bits().asstring(
-                item.sizeW * item.sizeH * 4
-            ),
-            0, 0, item.sizeW, item.sizeH
-        )
+        img32 = item.image.convertToFormat(QImage.Format_ARGB32)
+        ptr = img32.bits()
+        ptr.setsize(img32.byteCount())
+        layer.setPixelData(bytes(ptr), 0, 0, item.sizeW, item.sizeH)
         doc.setActiveNode(layer)
         doc.refreshProjection()

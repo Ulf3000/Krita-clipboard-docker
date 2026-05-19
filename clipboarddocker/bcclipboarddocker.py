@@ -7,7 +7,7 @@ Adapted from BuliCommander clipboard panel.
 from PyQt5.Qt import (
     QWidget, QVBoxLayout, QHBoxLayout, QToolBar, QAction, QActionGroup,
     QListView, QAbstractItemView, QStyledItemDelegate,
-    QLabel, QSizePolicy, QFrame, QSplitter, QTextEdit,
+    QLabel, QSizePolicy, QFrame, QSplitter,
     QStyleOptionViewItem, QPainter, QRect, QSize, QColor, QPen, QFont,
     QApplication, QMenu, QCursor, QScrollBar, QIcon,
     QAbstractListModel, QModelIndex, QVariant,
@@ -121,7 +121,14 @@ class BCClipboardDelegate(QStyledItemDelegate):
         rect: QRect = option.rect
 
         # --- Background ---
-        is_selected = option.state & 0x0020  # QStyle.State_Selected bitmask
+        # Call initStyleOption so Qt populates state flags correctly, then
+        # suppress the view's own selection drawing by removing State_Selected
+        # before calling the base paint — we draw the background ourselves so
+        # the custom delegate fully owns the row appearance.
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        is_selected = bool(opt.state & 0x0020)  # QStyle.State_Selected
+
         if is_selected:
             bg = _palette_color(QPalette.Highlight)
             fg = _palette_color(QPalette.HighlightedText)
@@ -151,18 +158,18 @@ class BCClipboardDelegate(QStyledItemDelegate):
             painter.setPen(QColor(120, 120, 120))
             painter.drawText(thumb_rect, Qt.AlignCenter, '…')
 
-        # --- Pin indicator ---
-        if item.pinned:
-            painter.setPen(QColor(255, 200, 0))
-            pin_r = QRect(thumb_rect.right() - 10, thumb_rect.top(), 10, 10)
-            painter.drawText(pin_r, Qt.AlignCenter, '📌')
-
         # --- Text area ---
+        # Reserve space on the right for the lock icon on pinned items.
+        LOCK_W    = 14
         text_x    = thumb_rect.right() + p * 2
-        text_w    = rect.right() - text_x - p
+        text_w    = rect.right() - text_x - p - (LOCK_W + p if item.pinned else 0)
         line_h    = (self.THUMB_H) // self.TEXT_LINES
         small_fnt = painter.font()
         small_fnt.setPointSize(max(6, small_fnt.pointSize()))
+
+        # Pinned items: amber text so the whole row stands out.
+        if item.pinned and not is_selected:
+            fg = QColor(220, 160, 0)
 
         painter.setPen(fg)
         painter.setFont(small_fnt)
@@ -178,6 +185,17 @@ class BCClipboardDelegate(QStyledItemDelegate):
         draw_line(0, item.typeLabel(), item.sourceShort(32))
         draw_line(1, 'Size',          item.sizeLabel())
         draw_line(2, 'Time',          item.timestampLabel())
+
+        # --- Lock icon at right edge for pinned items ---
+        if item.pinned:
+            lock_fnt = painter.font()
+            lock_fnt.setPointSize(max(8, lock_fnt.pointSize()))
+            painter.setFont(lock_fnt)
+            painter.setPen(QColor(220, 160, 0))
+            lock_r = QRect(rect.right() - LOCK_W - p,
+                           rect.top(),
+                           LOCK_W, rect.height())
+            painter.drawText(lock_r, Qt.AlignCenter, '🔒')
 
         # --- Border ---
         pen = QPen(QColor(80, 80, 80))
@@ -197,50 +215,47 @@ class BCClipboardDetail(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._current_item = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
 
         self._preview = QLabel()
         self._preview.setAlignment(Qt.AlignCenter)
         self._preview.setMinimumHeight(120)
-        self._preview.setStyleSheet('background:#2a2a2a; border:1px solid #555;')
+        self._preview.setStyleSheet('background:#b4b4b4; border:1px solid #909090;')
         layout.addWidget(self._preview)
 
-        self._info = QTextEdit()
-        self._info.setReadOnly(True)
-        self._info.setMaximumHeight(90)
-        layout.addWidget(self._info)
 
     def setItem(self, item: BCClipboardItem):
         if item is None:
             self._preview.clear()
-            self._info.clear()
             return
 
-        if item.thumbnail is not None:
+        # Use full-resolution image; fall back to thumbnail if not loaded yet.
+        if item.image is not None:
+            src_px = QPixmap.fromImage(item.image)
+        elif item.thumbnail is not None:
+            src_px = item.thumbnail
+        else:
+            src_px = None
+
+        self._current_item = item
+        if src_px is not None:
+            available_w = max(self._preview.width()  - 8, 1)
+            available_h = max(self._preview.height() - 8, 1)
             self._preview.setPixmap(
-                item.thumbnail.scaled(
-                    self._preview.width() - 8,
-                    self._preview.height() - 8,
-                    Qt.KeepAspectRatio,
-                    Qt.SmoothTransformation
-                )
+                src_px.scaled(available_w, available_h,
+                              Qt.KeepAspectRatio,
+                              Qt.SmoothTransformation)
             )
         else:
             self._preview.setText('No preview')
 
-        html = (
-            f'<b>Type:</b> {item.typeLabel()}<br>'
-            f'<b>Source:</b> {item.source}<br>'
-            f'<b>Size:</b> {item.sizeLabel()}<br>'
-            f'<b>Captured:</b> {item.timestampLabel()}<br>'
-            f'<b>Pinned:</b> {"Yes" if item.pinned else "No"}'
-        )
-        self._info.setHtml(html)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        # Nothing extra needed; label handles scaling on next setItem call
+        if self._current_item is not None:
+            self.setItem(self._current_item)
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +347,9 @@ class BCClipboardDockerWidget(QWidget):
         self._listView.setContextMenuPolicy(Qt.CustomContextMenu)
         self._listView.setUniformItemSizes(True)
         self._listView.setSpacing(1)
+        # Let the delegate draw the selection background; suppress the view's
+        # own highlight overlay so the two don't fight each other.
+        self._listView.setStyleSheet('QListView::item:selected { background: transparent; }')
         self._splitter.addWidget(self._listView)
 
         # Detail panel
