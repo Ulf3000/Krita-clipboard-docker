@@ -479,6 +479,7 @@ class BCClipboardDockerWidget(QWidget):
             idx = self._listView.currentIndex()
             self._model.dataChanged.emit(idx, idx)
             self._onItemCountChanged()
+            self._manager.saveHistory()  # persist the new pin state immediately
 
     def _onRemoveSelected(self):
         item = self._selectedItem()
