@@ -106,6 +106,15 @@ class BCClipboardDelegate(QStyledItemDelegate):
     THUMB_H    = 48
     PADDING    = 3
     TEXT_LINES = 3   # source, size, timestamp
+    CLOSE_W    = 14  # width/height of the ✕ hit area
+
+    @staticmethod
+    def closeBtnRect(item_rect: QRect) -> QRect:
+        """Return the ✕ button rect for a given row rect."""
+        sz = BCClipboardDelegate.CLOSE_W
+        return QRect(item_rect.right() - sz - 2,
+                     item_rect.top() + 2,
+                     sz, sz)
 
     def sizeHint(self, option, index):
         return QSize(option.rect.width(),
@@ -204,7 +213,42 @@ class BCClipboardDelegate(QStyledItemDelegate):
         painter.drawLine(rect.left(), rect.bottom(),
                          rect.right(), rect.bottom())
 
+        # --- ✕ close button (top-right corner) ---
+        close_rect = self.closeBtnRect(rect)
+        painter.fillRect(close_rect, QColor(180, 60, 60) if is_selected else QColor(100, 40, 40))
+        close_fnt = painter.font()
+        close_fnt.setPointSize(max(6, close_fnt.pointSize() - 2))
+        painter.setFont(close_fnt)
+        painter.setPen(QColor(220, 220, 220))
+        painter.drawText(close_rect, Qt.AlignCenter, '✕')
+
         painter.restore()
+
+
+
+# ---------------------------------------------------------------------------
+# Custom list view – handles ✕ click and middle-click delete
+# ---------------------------------------------------------------------------
+class BCClipboardListView(QListView):
+    """QListView subclass that intercepts mouse events for item deletion."""
+
+    deleteRequested = pyqtSignal(QModelIndex)
+
+    def mousePressEvent(self, event):
+        index = self.indexAt(event.pos())
+        if index.isValid():
+            # Middle-click → delete
+            if event.button() == Qt.MiddleButton:
+                self.deleteRequested.emit(index)
+                return
+            # Left-click on ✕ button → delete
+            if event.button() == Qt.LeftButton:
+                item_rect = self.visualRect(index)
+                close_rect = BCClipboardDelegate.closeBtnRect(item_rect)
+                if close_rect.contains(event.pos()):
+                    self.deleteRequested.emit(index)
+                    return
+        super().mousePressEvent(event)
 
 
 # ---------------------------------------------------------------------------
@@ -339,7 +383,7 @@ class BCClipboardDockerWidget(QWidget):
         self._splitter = QSplitter(Qt.Vertical)
 
         # List view
-        self._listView = QListView()
+        self._listView = BCClipboardListView()
         self._listView.setModel(self._model)
         self._listView.setItemDelegate(self._delegate)
         self._listView.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -374,6 +418,7 @@ class BCClipboardDockerWidget(QWidget):
         self._listView.selectionModel().currentChanged.connect(self._onSelectionChanged)
         self._listView.customContextMenuRequested.connect(self._onContextMenu)
         self._listView.doubleClicked.connect(self._onDoubleClick)
+        self._listView.deleteRequested.connect(self._onDeleteRequested)
 
         self._manager.itemAdded.connect(self._onItemCountChanged)
         self._manager.itemRemoved.connect(self._onItemCountChanged)
@@ -437,6 +482,12 @@ class BCClipboardDockerWidget(QWidget):
 
     def _onRemoveSelected(self):
         item = self._selectedItem()
+        if item:
+            self._manager.removeItem(item.uuid)
+
+    def _onDeleteRequested(self, index: QModelIndex):
+        """Handles ✕ button click and middle-click delete."""
+        item = self._model.getItem(index)
         if item:
             self._manager.removeItem(item.uuid)
 
