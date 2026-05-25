@@ -1,7 +1,8 @@
 # Clipboard Docker for Krita
 
 A lightweight Krita docker that gives you a persistent clipboard history panel — copy images, layers, or files and they stay available across your entire session.
-<img width="447" height="994" alt="grafik" src="https://github.com/user-attachments/assets/25e13f54-86d9-4979-b876-cf1d66bce57c" />
+<img width="576" height="1051" alt="image" src="https://github.com/user-attachments/assets/2ae96014-45ac-4cf8-9c6e-c9dd77dd8d0a" />
+
 
 
 ## Features
